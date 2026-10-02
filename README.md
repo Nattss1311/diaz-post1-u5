@@ -39,50 +39,35 @@ API REST: http://localhost:8080/api/reservas
 Vista Web MVC: http://localhost:8080/reservas
 ```
 
-## Decisiones de Diseño
-## Punto de Decisión 1: Validaciones de Solapamiento
-El filtro de solapamientos se delega a la base de datos mediante la consulta JPQL en `ReservaRepository.buscarSolapamientos()`. Esto evita cargar todas las reservas en memoria RAM (lo cual no escalaría bien a largo plazo). Sin embargo, la decisión de negocio y el lanzamiento de la excepción `ReservaConflictException` la gestiona exclusivamente `ReservaService`.
+## Decisiones de diseño
 
-## ¿Qué pasaría si el Controller llamara directamente al Repository?
+### Punto de decisión 1: Ubicación de la validación de solapamiento
+El filtrado de solapamientos se delegó al `ReservaRepository` mediante una consulta JPQL (`buscarSolapamientos`) porque realizar esta búsqueda en la base de datos es óptimo a nivel de memoria y rendimiento ($O(1)$ en transferencia de datos), evitando cargar todas las reservas a memoria en Java. Sin embargo, la decisión de negocio (qué hacer cuando hay un solapamiento, lanzar `ReservaConflictException` y definir el mensaje de error) vive exclusivamente en `ReservaService`. 
+*Si el Controller llamara directamente a `buscarSolapamientos()`, se rompería la arquitectura en capas al forzar a la capa de presentación a manejar lógica de dominio y transformar los datos devueltos por el Repository.*
 
-Si el controlador usara la consulta directamente, la lógica de validación de negocio quedaría expuesta en la capa HTTP, rompiendo la arquitectura en capas y duplicando código si se añaden otros clientes o controladores.
+### Punto de decisión 2: Reglas con y sin apoyo del Repository
+La validación del horario de atención (07:00 a 21:00) y la duración permitida (30 minutos a 3 horas) no requiere consultar la base de datos porque depende únicamente de los atributos del propio objeto `Reserva` enviado en la petición. Por lo tanto, vive en `ReservaService` ejecutada en memoria con Java puro. El criterio general aplicado es: si la regla requiere validar consistencia contra el estado global del sistema (otras reservas), se apoya en el `Repository`; si depende solo del estado del objeto de entrada, se valida directamente en el `Service`.
 
-## Punto de Decisión 2: Separación de Reglas de Negocio y Justificación de Arquitectura
-**Reglas con acceso a datos:** Como la comprobación de cruces de horario, se apoyan en consultas específicas de ReservaRepository.
+### Punto de decisión 3: Cómo comparten Service el Controller MVC y el REST
+Tanto `ReservaController` (REST) como `ReservaWebController` (MVC) reciben por inyección de dependencias por constructor exactamente el mismo bean singleton `ReservaService`. Duplicar la lógica en un controlador o crear un `ReservaWebService` secundario habría violado el principio DRY (*Don't Repeat Yourself*), obligando a modificar dos archivos ante cualquier cambio en las reglas de negocio.
 
-**Reglas puras del dominio:** La validación de horario de atención (07:00 a 21:00) y la duración permitida (30 min a 3 horas) residen 100% en `ReservaService` utilizando Java puro, ya que solo dependen de los datos de la solicitud y no requieren consultar la base de datos.
+### Punto de decisión 4: Manejo de errores consistente entre MVC y REST
+Se implementaron dos manejadores independientes: `GlobalRestExceptionHandler` (restringido con `annotations = RestController.class`) y `ReservaWebExceptionHandler` (restringido con `assignableTypes = ReservaWebController.class`). Un único `@RestControllerAdvice` no es adecuado porque serializa siempre las respuestas a formato JSON. La interfaz web MVC necesita una redirección (`redirect:/reservas/nueva`) adjuntando el mensaje mediante `FlashAttributes` para mostrar una alerta HTML al usuario, manteniendo la separación de responsabilidades según el canal de presentación.
+## Evidencias de Funcionamiento
 
-**Justificación de Arquitectura en Controladores:** `LaboratorioController` accede directamente a `LaboratorioRepository` sin pasar por un `Service` debido a que el catálogo de laboratorios es un CRUD básico sin reglas de negocio adicionales. Crear un LaboratorioService en este contexto generaría el antipatrón de Service anémico. En cambio, `ReservaController` delega siempre sus peticiones a `ReservaService`, donde se aplican las reglas de negocio e invalidez de solapamientos.
+### 1. API REST (Controlador REST)
+* **Creación exitosa de reserva (HTTP 201 Created):**
+  ![Prueba REST 201 Created](images/rest-crear-exito.png)
 
-## Punto de Decisión 3: Cómo comparten Service el Controller MVC y el REST
-Tanto `ReservaController` (API REST) como   `ReservaWebController` (MVC con Thymeleaf) inyectan exactamente el mismo bean de `ReservaService` mediante inyección por constructor. Se descarta la duplicación de validaciones o la creación de un servicio específico para la web para evitar discrepancias en las reglas de negocio (solapamiento y horario) ante futuros cambios.
+* **Manejo de conflicto por solapamiento (HTTP 409 Conflict):**
+  ![Prueba REST 409 Conflicto](images/est-error-conflicto.png)
 
-## Punto de Decisión 4: Manejo de Errores Consistente entre MVC y REST
-No se utilizaron los errores de `ReservaWebController` dentro de un único `@RestControllerAdvice` global porque este serializa siempre a JSON, mientras que la vista Thymeleaf requiere una redirección con un mensaje en HTML. La alternativa de detectar el encabezado Accept añadía condicionales innecesarios. Se optó por dos manejadores separados:
+### 2. Interfaz Web (Controlador MVC con Thymeleaf)
+* **Listado general de reservas habilitadas:**
+  ![Listado de Reservas](images/lista-reservas-web.png)
 
-**GlobalRestExceptionHandler (restringido a @RestController).**
-
-**ReservaWebExceptionHandler (restringido con assignableTypes = ReservaWebController.class).**
-
-Ambos manejadores parten del mismo vocabulario de excepciones de dominio, manteniendo la separación de responsabilidades según la superficie de presentación.
-
-## Evidencia de Funcionamiento (Capturas)
-
-### Vista Web MVC (Thymeleaf)
-![Lista de Reservas](images/lista-reservas-web.png)
-![Error de Solapamiento en Web](images/error-solapamiento-web.png)
-
-### API REST (Postman / cURL)
-![Pruebas API REST](images/api-json.png)
-
-## Herramientas Utilizadas
-Lenguaje & Framework: Java 17, Spring Boot 3.2.x
-
-Persistencia: Spring Data JPA, Hibernate, H2 Database (In-Memory)
-
-Vista: Thymeleaf, HTML5
-
-Construcción & Control de Versiones: Apache Maven, Git, GitHub
+* **Validación de solapamiento en formulario con mensaje de error:**
+  ![Formulario con Error de Solapamiento](images/error-solapamiento-web.png)
 
 ## Conclusiones
-El desarrollo de esta aplicación demostró cómo una arquitectura adecuadamente desacoplada permite exponer múltiples interfaces de usuario (API REST y MVC con Thymeleaf) reutilizando una única capa de servicios sin duplicar reglas de dominio. La definición precisa de responsabilidades permitió delegar consultas complejas de tiempo a la base de datos manteniendo la decisión de negocio centralizada en la capa Service. Finalmente, la segregación de manejadores de excepciones garantizó respuestas coherentes para clientes programáticos en JSON y redirecciones informativas en HTML para usuarios web.
+La implementación de este sistema permitió comprender la importancia de mantener una clara separación de responsabilidades mediante la arquitectura en capas. El principal reto consistió en identificar el límite exacto entre las consultas de datos del `Repository` y la toma de decisiones de negocio dentro del `Service`. La reutilización del `Service` entre la API REST y la vista MVC demostró las ventajas de centralizar la lógica de dominio, garantizando la consistencia de las reglas de negocio independientemente del canal de entrada.
