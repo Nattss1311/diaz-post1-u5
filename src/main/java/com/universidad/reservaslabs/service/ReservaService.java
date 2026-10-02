@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.universidad.reservaslabs.exception.RecursoNoEncontradoException;
 import com.universidad.reservaslabs.exception.ReservaConflictException;
+import com.universidad.reservaslabs.exception.ReservaInvalidaException;
 import com.universidad.reservaslabs.model.EstadoReserva;
 import com.universidad.reservaslabs.model.Laboratorio;
 import com.universidad.reservaslabs.model.Reserva;
@@ -48,10 +49,10 @@ public class ReservaService {
                 "Laboratorio no encontrado: " + reserva.getLaboratorio().getId()));
         reserva.setLaboratorio(laboratorio);
 
-        // Regla de negocio 1 — horario de atención y duración permitida
+        // Regla de negocio 1 — horario de atención y duración permitida (retorna 400 mediante ReservaInvalidaException)
         validarHorarioYDuracion(reserva.getInicio(), reserva.getFin());
 
-        // Regla de negocio 2 — no permitir horario solapado
+        // Regla de negocio 2 — no permitir horario solapado (retorna 409 mediante ReservaConflictException)
         List<Reserva> solapamientos = reservaRepo.buscarSolapamientos(
             laboratorio.getId(), reserva.getInicio(), reserva.getFin());
         if (!solapamientos.isEmpty()) {
@@ -78,15 +79,15 @@ public class ReservaService {
 
     private void validarHorarioYDuracion(LocalDateTime inicio, LocalDateTime fin) {
         if (inicio == null || fin == null || !fin.isAfter(inicio)) {
-            throw new ReservaConflictException("El rango de fecha y hora de la reserva es inválido");
+            throw new ReservaInvalidaException("El rango de fecha y hora de la reserva es inválido");
         }
         Duration duracion = Duration.between(inicio, fin);
         if (duracion.compareTo(DURACION_MINIMA) < 0 || duracion.compareTo(DURACION_MAXIMA) > 0) {
-            throw new ReservaConflictException(
+            throw new ReservaInvalidaException(
                 "La duración de la reserva debe estar entre 30 minutos y 3 horas");
         }
         if (inicio.toLocalTime().isBefore(APERTURA) || fin.toLocalTime().isAfter(CIERRE)) {
-            throw new ReservaConflictException(
+            throw new ReservaInvalidaException(
                 "La reserva debe estar dentro del horario de atención (07:00 - 21:00)");
         }
     }
